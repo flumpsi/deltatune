@@ -69,9 +69,14 @@ fn main() -> Result<()> {
     layer.set_size(1, 1);
     layer.commit();
 
-    let font_path = PathBuf::from("../DeltaTune/Content/Fonts/MusicTitleFont.fnt");
-    let texture_path = PathBuf::from("../DeltaTune/Content/Fonts/MusicTitleFont.png");
-
+    let font_path = PathBuf::from("/usr/share/deltatune/MusicTitleFont.fnt");
+    let texture_path = PathBuf::from("/usr/share/deltatune/MusicTitleFont.png");
+    // if the font fails to load, then we are probably running in a development environment, so we can try to load from the current directory and then inside assets/
+    let (font_path, texture_path) = if !font_path.exists() || !texture_path.exists() {
+        (PathBuf::from("assets/MusicTitleFont.fnt"), PathBuf::from("assets/MusicTitleFont.png"))
+    } else {
+        (font_path, texture_path)
+    };
     let mut font = load_bitmap_font(&font_path).unwrap_or_else(|_| BitmapFont::fallback());
     let atlas = FontAtlas::load(&texture_path, &mut font).unwrap_or_else(|_| FontAtlas::empty());
 
