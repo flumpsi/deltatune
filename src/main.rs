@@ -1,4 +1,5 @@
 use anyhow::Result;
+use minifb::{Window, WindowOptions};
 use mpris::{PlaybackStatus, PlayerFinder};
 use serde::{Deserialize, Serialize};
 use smithay_client_toolkit::{
@@ -52,6 +53,25 @@ fn main() -> Result<()> {
 
     start_tray(settings_path.clone());
 
+    let has_wayland = std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false);
+    let has_x11 = std::env::var("DISPLAY").map(|v| !v.is_empty()).unwrap_or(false);
+
+    if has_wayland {
+        run_wayland(settings_path, settings, settings_state, rx)
+    } else if has_x11 {
+        run_x11(settings_path, settings, settings_state, rx)
+    } else {
+        eprintln!("No supported display server found (WAYLAND_DISPLAY or DISPLAY).");
+        Ok(())
+    }
+}
+
+fn run_wayland(
+    settings_path: PathBuf,
+    settings: Settings,
+    settings_state: SettingsState,
+    rx: Receiver<MediaInfo>,
+) -> Result<()> {
     let conn = Connection::connect_to_env()?;
     let (globals, mut event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
@@ -69,17 +89,7 @@ fn main() -> Result<()> {
     layer.set_size(1, 1);
     layer.commit();
 
-    let font_path = PathBuf::from("/usr/share/deltatune/MusicTitleFont.fnt");
-    let texture_path = PathBuf::from("/usr/share/deltatune/MusicTitleFont.png");
-    // if the font fails to load, then we are probably running in a development environment, so we can try to load from the current directory and then inside assets/
-    let (font_path, texture_path) = if !font_path.exists() || !texture_path.exists() {
-        (PathBuf::from("assets/MusicTitleFont.fnt"), PathBuf::from("assets/MusicTitleFont.png"))
-    } else {
-        (font_path, texture_path)
-    };
-    let mut font = load_bitmap_font(&font_path).unwrap_or_else(|_| BitmapFont::fallback());
-    let atlas = FontAtlas::load(&texture_path, &mut font).unwrap_or_else(|_| FontAtlas::empty());
-
+    let (font, atlas) = load_assets();
     let pool = SlotPool::new(4, &shm).expect("Failed to create slot pool");
 
     let mut app = OverlayApp {
@@ -103,7 +113,6 @@ fn main() -> Result<()> {
         display: DisplayController::new(),
     };
 
-
     loop {
         event_queue.blocking_dispatch(&mut app)?;
         if app.exit {
@@ -112,6 +121,65 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_x11(
+    settings_path: PathBuf,
+    settings: Settings,
+    settings_state: SettingsState,
+    rx: Receiver<MediaInfo>,
+) -> Result<()> {
+    let (font, atlas) = load_assets();
+    let mut app = X11App::new(settings_path, settings, settings_state, font, atlas, rx);
+
+    app.draw();
+
+    let mut window_w = app.width.max(1);
+    let mut window_h = app.height.max(1);
+    let mut window = Window::new(
+        "DeltaTune",
+        window_w as usize,
+        window_h as usize,
+        WindowOptions::default(),
+    )?;
+    window.limit_update_rate(Some(Duration::from_micros(16_666)));
+
+    while window.is_open() {
+        app.draw();
+
+        if app.width != window_w || app.height != window_h {
+            window_w = app.width.max(1);
+            window_h = app.height.max(1);
+            window = Window::new(
+                "DeltaTune",
+                window_w as usize,
+                window_h as usize,
+                WindowOptions::default(),
+            )?;
+            window.limit_update_rate(Some(Duration::from_micros(16_666)));
+        }
+
+        window.update_with_buffer(&app.pixels, window_w as usize, window_h as usize)?;
+    }
+
+    Ok(())
+}
+
+fn load_assets() -> (BitmapFont, FontAtlas) {
+    let font_path = PathBuf::from("/usr/share/deltatune/MusicTitleFont.fnt");
+    let texture_path = PathBuf::from("/usr/share/deltatune/MusicTitleFont.png");
+    // If the font fails to load, we are probably running in a development environment.
+    let (font_path, texture_path) = if !font_path.exists() || !texture_path.exists() {
+        (
+            PathBuf::from("assets/MusicTitleFont.fnt"),
+            PathBuf::from("assets/MusicTitleFont.png"),
+        )
+    } else {
+        (font_path, texture_path)
+    };
+    let mut font = load_bitmap_font(&font_path).unwrap_or_else(|_| BitmapFont::fallback());
+    let atlas = FontAtlas::load(&texture_path, &mut font).unwrap_or_else(|_| FontAtlas::empty());
+    (font, atlas)
 }
 
 fn default_settings_path() -> PathBuf {
@@ -733,6 +801,199 @@ impl DisplayController {
     }
 }
 
+struct X11App {
+    width: u32,
+    height: u32,
+    last_frame: Instant,
+    settings_path: PathBuf,
+    settings: Settings,
+    settings_state: SettingsState,
+    font: BitmapFont,
+    atlas: FontAtlas,
+    media: MediaState,
+    media_rx: Receiver<MediaInfo>,
+    display: DisplayController,
+    canvas: Vec<u8>,
+    pixels: Vec<u32>,
+}
+
+impl X11App {
+    fn new(
+        settings_path: PathBuf,
+        settings: Settings,
+        settings_state: SettingsState,
+        font: BitmapFont,
+        atlas: FontAtlas,
+        media_rx: Receiver<MediaInfo>,
+    ) -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            last_frame: Instant::now(),
+            settings_path,
+            settings,
+            settings_state,
+            font,
+            atlas,
+            media: MediaState::default(),
+            media_rx,
+            display: DisplayController::new(),
+            canvas: Vec::new(),
+            pixels: Vec::new(),
+        }
+    }
+
+    fn draw(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_frame).as_secs_f32();
+        self.last_frame = now;
+
+        self.poll_media_updates();
+        self.reload_settings_if_needed();
+        self.update_display_state(dt);
+
+        let scale = self.settings.scale_factor * self.settings.text_scale;
+        let padding = 12.0;
+
+        let mut max_width: f32 = 1.0;
+        let mut max_height: f32 = self.font.line_height * scale;
+        for slot in self.display.slots.iter() {
+            if slot.state == DisplayState::Hidden || slot.opacity <= 0.0 || slot.text.is_empty() {
+                continue;
+            }
+            let (w, h) = measure_text(&slot.text, &self.font, scale);
+            max_width = max_width.max(w);
+            max_height = max_height.max(h);
+        }
+
+        let desired_width = ((max_width + padding * 2.0) * self.settings.scale_x)
+            .max(1.0)
+            .round() as u32;
+        let desired_height = ((max_height + padding * 2.0) * self.settings.scale_y)
+            .max(1.0)
+            .round() as u32;
+
+        if desired_width != self.width || desired_height != self.height {
+            self.width = desired_width;
+            self.height = desired_height;
+        }
+
+        let needed = (self.width * self.height * 4) as usize;
+        if self.canvas.len() != needed {
+            self.canvas.resize(needed, 0);
+        }
+
+        fill_background(
+            &mut self.canvas,
+            self.settings.force_opaque_background,
+            self.settings.background_opacity,
+        );
+
+        for slot in self.display.slots.iter() {
+            if slot.state == DisplayState::Hidden || slot.opacity <= 0.0 || slot.text.is_empty() {
+                continue;
+            }
+            let origin_x = padding + slot.offset_x;
+            let origin_y = padding;
+            draw_text(
+                &mut self.canvas,
+                self.width,
+                self.height,
+                &self.font,
+                &self.atlas,
+                &slot.text,
+                scale,
+                origin_x,
+                origin_y,
+                slot.opacity,
+            );
+        }
+
+        pack_bgra_to_xrgb(&self.canvas, &mut self.pixels);
+    }
+
+    fn poll_media_updates(&mut self) {
+        while let Ok(info) = self.media_rx.try_recv() {
+            self.media.info = info;
+            self.media.last_update = Instant::now();
+        }
+    }
+
+    fn reload_settings_if_needed(&mut self) {
+        if self.settings_state.last_check.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        self.settings_state.last_check = Instant::now();
+
+        let metadata = match fs::metadata(&self.settings_path) {
+            Ok(metadata) => metadata,
+            Err(_) => return,
+        };
+        let modified = metadata.modified().ok();
+        if modified.is_none() || modified == self.settings_state.last_modified {
+            return;
+        }
+
+        if let Ok(settings) = Settings::load(&self.settings_path) {
+            self.settings = settings;
+        }
+        self.settings_state.last_modified = modified;
+    }
+
+    fn update_display_state(&mut self, dt: f32) {
+        let mut title_changed = false;
+        let mut artist_changed = false;
+        let mut status_changed = false;
+
+        if self.display.current_media != self.media.info {
+            title_changed = self.display.current_media.title != self.media.info.title;
+            artist_changed = self.display.current_media.artist != self.media.info.artist;
+            status_changed = self.display.current_media.status != self.media.info.status;
+            self.display.current_media = self.media.info.clone();
+        }
+
+        let mut should_update = if self.settings.show_playback_status {
+            title_changed || artist_changed || status_changed
+        } else {
+            title_changed || artist_changed
+        };
+
+        if !should_update
+            && !self.settings.show_playback_status
+            && status_changed
+            && self.media.info.status == MediaStatus::Playing
+        {
+            should_update = true;
+        }
+
+        let primary_index = self.display.primary_index;
+        if !self.settings.show_playback_status
+            && should_update
+            && self.media.info.status != MediaStatus::Playing
+            && self.display.slots[primary_index].state == DisplayState::Hidden
+        {
+            should_update = false;
+        }
+
+        if should_update {
+            match self.display.slots[primary_index].state {
+                DisplayState::Hidden => swap_and_show(&mut self.display, &self.settings),
+                DisplayState::Visible => {
+                    if title_changed || artist_changed {
+                        swap_and_show(&mut self.display, &self.settings)
+                    }
+                }
+                DisplayState::Disappearing => swap_and_show(&mut self.display, &self.settings),
+                DisplayState::AppearingDelay | DisplayState::Appearing => {}
+            }
+        }
+
+        for slot in self.display.slots.iter_mut() {
+            update_display_slot(slot, &self.settings, &self.media, dt);
+        }
+    }
+}
+
 struct OverlayApp {
     registry_state: RegistryState,
     output_state: OutputState,
@@ -1228,6 +1489,19 @@ fn fill_background(canvas: &mut [u8], force_opaque: bool, opacity: f32) {
         chunk[1] = 0;
         chunk[2] = 0;
         chunk[3] = a;
+    }
+}
+
+fn pack_bgra_to_xrgb(src: &[u8], dst: &mut Vec<u32>) {
+    let count = src.len() / 4;
+    if dst.len() != count {
+        dst.resize(count, 0);
+    }
+    for (i, chunk) in src.chunks_exact(4).enumerate() {
+        let b = chunk[0] as u32;
+        let g = chunk[1] as u32;
+        let r = chunk[2] as u32;
+        dst[i] = (r << 16) | (g << 8) | b;
     }
 }
 

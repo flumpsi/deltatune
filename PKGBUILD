@@ -1,11 +1,11 @@
 # Maintainer: flumpsi <flumpsi@outlook.com>
 pkgname=deltatune
-pkgver=0.1.0.r3.ge07b09d
+pkgver=0.1.0.r4.g5e86d00
 pkgrel=1
 pkgdesc="deltatune shows you what is playing using mpris in similar fashion to what DELTARUNE did once in chapter 1 when hopes and dreams started playing"
 arch=('x86_64')
 license=('MIT')
-depends=('gtk3' 'libappindicator-gtk3' 'wayland' 'libxkbcommon')
+depends=('gtk3' 'libappindicator-gtk3' 'wayland' 'libxkbcommon' 'libx11' 'libxrandr')
 makedepends=('cargo' 'pkgconf' 'git')
 provides=('deltatune')
 conflicts=('deltatune-bin' 'deltatune-git')
