@@ -1,8 +1,8 @@
 # Maintainer: flumpsi <flumpsi@outlook.com>
 pkgname=deltatune
-pkgver=0.1.0.r6.g2ab1f2a
+pkgver=0.1.0.r8.g645962a
 pkgrel=1
-pkgdesc="deltatune shows you what is playing using mpris in similar fashion to what DELTARUNE did once in chapter 1 when hopes and dreams started playing"
+pkgdesc="deltatune shows you what is playing using mpris in similar fashion to what DELTARUNE did once in chapter 1 when the field of hopes and dreams started playing"
 arch=('x86_64')
 license=('MIT')
 depends=('gtk3' 'libappindicator-gtk3' 'wayland' 'libxkbcommon' 'libx11' 'libxrandr' 'xdotool' 'libxfixes')
