@@ -136,12 +136,21 @@ fn run_x11(
 
     let mut window_w = app.width.max(1);
     let mut window_h = app.height.max(1);
+    let window_options = WindowOptions {
+        borderless: true,
+        title: false,
+        resize: false,
+        topmost: true,
+        transparency: true,
+        ..WindowOptions::default()
+    };
     let mut window = Window::new(
         "DeltaTune",
         window_w as usize,
         window_h as usize,
-        WindowOptions::default(),
+        window_options,
     )?;
+    window.set_position(app.settings.x_pos as isize, app.settings.y_pos as isize);
     window.limit_update_rate(Some(Duration::from_micros(16_666)));
 
     while window.is_open() {
@@ -154,11 +163,13 @@ fn run_x11(
                 "DeltaTune",
                 window_w as usize,
                 window_h as usize,
-                WindowOptions::default(),
+                window_options,
             )?;
+            window.set_position(app.settings.x_pos as isize, app.settings.y_pos as isize);
             window.limit_update_rate(Some(Duration::from_micros(16_666)));
         }
 
+        window.set_position(app.settings.x_pos as isize, app.settings.y_pos as isize);
         window.update_with_buffer(&app.pixels, window_w as usize, window_h as usize)?;
     }
 
@@ -909,7 +920,7 @@ impl X11App {
             );
         }
 
-        pack_bgra_to_xrgb(&self.canvas, &mut self.pixels);
+        pack_bgra_to_argb(&self.canvas, &mut self.pixels);
     }
 
     fn poll_media_updates(&mut self) {
@@ -1492,7 +1503,7 @@ fn fill_background(canvas: &mut [u8], force_opaque: bool, opacity: f32) {
     }
 }
 
-fn pack_bgra_to_xrgb(src: &[u8], dst: &mut Vec<u32>) {
+fn pack_bgra_to_argb(src: &[u8], dst: &mut Vec<u32>) {
     let count = src.len() / 4;
     if dst.len() != count {
         dst.resize(count, 0);
@@ -1501,7 +1512,8 @@ fn pack_bgra_to_xrgb(src: &[u8], dst: &mut Vec<u32>) {
         let b = chunk[0] as u32;
         let g = chunk[1] as u32;
         let r = chunk[2] as u32;
-        dst[i] = (r << 16) | (g << 8) | b;
+        let a = chunk[3] as u32;
+        dst[i] = (a << 24) | (r << 16) | (g << 8) | b;
     }
 }
 

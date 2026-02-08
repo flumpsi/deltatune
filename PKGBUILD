@@ -1,12 +1,12 @@
 # Maintainer: flumpsi <flumpsi@outlook.com>
 pkgname=deltatune
-pkgver=0.1.0.r4.g5e86d00
+pkgver=0.1.0.r5.g6e60031
 pkgrel=1
 pkgdesc="deltatune shows you what is playing using mpris in similar fashion to what DELTARUNE did once in chapter 1 when hopes and dreams started playing"
 arch=('x86_64')
 license=('MIT')
-depends=('gtk3' 'libappindicator-gtk3' 'wayland' 'libxkbcommon' 'libx11' 'libxrandr')
-makedepends=('cargo' 'pkgconf' 'git')
+depends=('gtk3' 'libappindicator-gtk3' 'wayland' 'libxkbcommon' 'libx11' 'libxrandr' 'xdotool')
+makedepends=('cargo' 'pkgconf' 'git' 'xdotool')
 provides=('deltatune')
 conflicts=('deltatune-bin' 'deltatune-git')
 source=("deltatune::git+https://github.com/flumpsi/deltatune.git")
@@ -21,6 +21,8 @@ pkgver() {
 
 build() {
   cd "$srcdir/deltatune/"
+  export CFLAGS="${CFLAGS/-flto=auto/} -fno-lto"
+  export CXXFLAGS="${CXXFLAGS/-flto=auto/} -fno-lto"
   cargo build --release --locked
 }
 
