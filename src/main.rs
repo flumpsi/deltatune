@@ -1,5 +1,5 @@
 use anyhow::Result;
-use minifb::{Window, WindowOptions};
+use minifb::{Icon as MinifbIcon, Window, WindowOptions};
 use mpris::{PlaybackStatus, PlayerFinder};
 use serde::{Deserialize, Serialize};
 use smithay_client_toolkit::{
@@ -130,6 +130,7 @@ fn run_x11(
     rx: Receiver<MediaInfo>,
 ) -> Result<()> {
     let (font, atlas) = load_assets();
+    let icon_data = load_icon_buffer();
     let mut app = X11App::new(settings_path, settings, settings_state, font, atlas, rx);
 
     app.draw();
@@ -150,6 +151,11 @@ fn run_x11(
         window_h as usize,
         window_options,
     )?;
+    if let Some(ref data) = icon_data {
+        if let Ok(icon) = MinifbIcon::try_from(data.as_slice()) {
+            window.set_icon(icon);
+        }
+    }
     window.set_position(app.settings.x_pos as isize, app.settings.y_pos as isize);
     window.limit_update_rate(Some(Duration::from_micros(16_666)));
 
@@ -165,6 +171,11 @@ fn run_x11(
                 window_h as usize,
                 window_options,
             )?;
+            if let Some(ref data) = icon_data {
+                if let Ok(icon) = MinifbIcon::try_from(data.as_slice()) {
+                    window.set_icon(icon);
+                }
+            }
             window.set_position(app.settings.x_pos as isize, app.settings.y_pos as isize);
             window.limit_update_rate(Some(Duration::from_micros(16_666)));
         }
@@ -191,6 +202,31 @@ fn load_assets() -> (BitmapFont, FontAtlas) {
     let mut font = load_bitmap_font(&font_path).unwrap_or_else(|_| BitmapFont::fallback());
     let atlas = FontAtlas::load(&texture_path, &mut font).unwrap_or_else(|_| FontAtlas::empty());
     (font, atlas)
+}
+
+fn load_icon_buffer() -> Option<Vec<u64>> {
+    let icon_path = PathBuf::from("/usr/share/deltatune/deltatune.png");
+    let icon_path = if icon_path.exists() {
+        icon_path
+    } else {
+        PathBuf::from("assets/deltatune.png")
+    };
+
+    let image = image::open(&icon_path).ok()?.to_rgba8();
+    let (width, height) = image.dimensions();
+    let mut data = Vec::with_capacity((width * height + 2) as usize);
+    data.push(width as u64);
+    data.push(height as u64);
+
+    for px in image.into_raw().chunks_exact(4) {
+        let r = px[0] as u64;
+        let g = px[1] as u64;
+        let b = px[2] as u64;
+        let a = px[3] as u64;
+        data.push((a << 24) | (r << 16) | (g << 8) | b);
+    }
+
+    Some(data)
 }
 
 fn default_settings_path() -> PathBuf {
@@ -411,9 +447,7 @@ fn tray_thread(settings_path: PathBuf) -> anyhow::Result<()> {
     let quit_id = quit_item.id().clone();
     menu.append(&quit_item)?;
 
-    let icon_image =
-        image::RgbaImage::from_pixel(32, 32, image::Rgba([255, 255, 255, 255]));
-    let icon = Icon::from_rgba(icon_image.into_raw(), 32, 32)?;
+    let icon = load_tray_icon()?;
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -454,6 +488,27 @@ fn tray_thread(settings_path: PathBuf) -> anyhow::Result<()> {
     drop(tray);
 
     Ok(())
+}
+
+fn load_tray_icon() -> anyhow::Result<Icon> {
+    let icon_path = PathBuf::from("/usr/share/deltatune/deltatune.png");
+    let icon_path = if icon_path.exists() {
+        icon_path
+    } else {
+        PathBuf::from("assets/deltatune.png")
+    };
+
+    let icon_image = image::open(&icon_path).map(|img| img.to_rgba8()).unwrap_or_else(|_| {
+        image::RgbaImage::from_pixel(32, 32, image::Rgba([255, 255, 255, 255]))
+    });
+
+    let icon_image = if icon_image.dimensions() != (32, 32) {
+        image::imageops::resize(&icon_image, 32, 32, image::imageops::FilterType::Triangle)
+    } else {
+        icon_image
+    };
+
+    Ok(Icon::from_rgba(icon_image.into_raw(), 32, 32)?)
 }
 
 fn build_settings_window(settings_path: PathBuf) -> anyhow::Result<gtk::Window> {
