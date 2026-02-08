@@ -131,12 +131,20 @@ fn run_x11(
 ) -> Result<()> {
     let (font, atlas) = load_assets();
     let icon_data = load_icon_buffer();
-    let mut app = X11App::new(settings_path, settings, settings_state, font, atlas, rx);
+    let (window_w, window_h) = compute_x11_window_size(&settings, &font);
+    let mut app = X11App::new(
+        settings_path,
+        settings,
+        settings_state,
+        font,
+        atlas,
+        rx,
+        window_w,
+        window_h,
+    );
 
     app.draw();
 
-    let mut window_w = app.width.max(1);
-    let mut window_h = app.height.max(1);
     let window_options = WindowOptions {
         borderless: true,
         title: false,
@@ -156,30 +164,12 @@ fn run_x11(
             window.set_icon(icon);
         }
     }
+    apply_x11_overlay_hints(&window);
     window.set_position(app.settings.x_pos as isize, app.settings.y_pos as isize);
     window.limit_update_rate(Some(Duration::from_micros(16_666)));
 
     while window.is_open() {
         app.draw();
-
-        if app.width != window_w || app.height != window_h {
-            window_w = app.width.max(1);
-            window_h = app.height.max(1);
-            window = Window::new(
-                "DeltaTune",
-                window_w as usize,
-                window_h as usize,
-                window_options,
-            )?;
-            if let Some(ref data) = icon_data {
-                if let Ok(icon) = MinifbIcon::try_from(data.as_slice()) {
-                    window.set_icon(icon);
-                }
-            }
-            window.set_position(app.settings.x_pos as isize, app.settings.y_pos as isize);
-            window.limit_update_rate(Some(Duration::from_micros(16_666)));
-        }
-
         window.set_position(app.settings.x_pos as isize, app.settings.y_pos as isize);
         window.update_with_buffer(&app.pixels, window_w as usize, window_h as usize)?;
     }
@@ -227,6 +217,69 @@ fn load_icon_buffer() -> Option<Vec<u64>> {
     }
 
     Some(data)
+}
+
+fn compute_x11_window_size(settings: &Settings, font: &BitmapFont) -> (u32, u32) {
+    let (screen_w, _) = x11_screen_size().unwrap_or((800, 600));
+    let scale = settings.scale_factor * settings.text_scale;
+    let padding = 12.0;
+    let lines = if settings.show_artist_name { 2.0 } else { 1.0 };
+    let height = ((font.line_height * scale * lines + padding * 2.0) * settings.scale_y)
+        .max(1.0)
+        .round() as u32;
+    (screen_w.max(1), height.max(1))
+}
+
+fn x11_screen_size() -> Option<(u32, u32)> {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let xlib = x11_dl::xlib::Xlib::open().ok()?;
+        let display = (xlib.XOpenDisplay)(std::ptr::null());
+        if display.is_null() {
+            return None;
+        }
+        let screen = (xlib.XDefaultScreen)(display);
+        let width = (xlib.XDisplayWidth)(display, screen).max(1) as u32;
+        let height = (xlib.XDisplayHeight)(display, screen).max(1) as u32;
+        (xlib.XCloseDisplay)(display);
+        Some((width, height))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn apply_x11_overlay_hints(window: &Window) {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let xlib = match x11_dl::xlib::Xlib::open() {
+            Ok(lib) => lib,
+            Err(_) => return,
+        };
+        let xfixes = match x11_dl::xfixes::Xlib::open() {
+            Ok(lib) => lib,
+            Err(_) => return,
+        };
+        let display = (xlib.XOpenDisplay)(std::ptr::null());
+        if display.is_null() {
+            return;
+        }
+        let window_id = window.get_window_handle() as x11_dl::xlib::Window;
+
+        let mut hints: x11_dl::xlib::XWMHints = std::mem::zeroed();
+        hints.flags = x11_dl::xlib::InputHint;
+        hints.input = 0;
+        (xlib.XSetWMHints)(display, window_id, &mut hints);
+
+        let region = (xfixes.XFixesCreateRegion)(display, std::ptr::null_mut(), 0);
+        const SHAPE_INPUT: i32 = 2;
+        (xfixes.XFixesSetWindowShapeRegion)(display, window_id, SHAPE_INPUT, 0, 0, region);
+        (xfixes.XFixesDestroyRegion)(display, region);
+
+        (xlib.XFlush)(display);
+        (xlib.XCloseDisplay)(display);
+    }
 }
 
 fn default_settings_path() -> PathBuf {
@@ -891,10 +944,12 @@ impl X11App {
         font: BitmapFont,
         atlas: FontAtlas,
         media_rx: Receiver<MediaInfo>,
+        window_width: u32,
+        window_height: u32,
     ) -> Self {
         Self {
-            width: 1,
-            height: 1,
+            width: window_width.max(1),
+            height: window_height.max(1),
             last_frame: Instant::now(),
             settings_path,
             settings,
@@ -920,29 +975,6 @@ impl X11App {
 
         let scale = self.settings.scale_factor * self.settings.text_scale;
         let padding = 12.0;
-
-        let mut max_width: f32 = 1.0;
-        let mut max_height: f32 = self.font.line_height * scale;
-        for slot in self.display.slots.iter() {
-            if slot.state == DisplayState::Hidden || slot.opacity <= 0.0 || slot.text.is_empty() {
-                continue;
-            }
-            let (w, h) = measure_text(&slot.text, &self.font, scale);
-            max_width = max_width.max(w);
-            max_height = max_height.max(h);
-        }
-
-        let desired_width = ((max_width + padding * 2.0) * self.settings.scale_x)
-            .max(1.0)
-            .round() as u32;
-        let desired_height = ((max_height + padding * 2.0) * self.settings.scale_y)
-            .max(1.0)
-            .round() as u32;
-
-        if desired_width != self.width || desired_height != self.height {
-            self.width = desired_width;
-            self.height = desired_height;
-        }
 
         let needed = (self.width * self.height * 4) as usize;
         if self.canvas.len() != needed {
