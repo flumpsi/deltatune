@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use minifb::{Icon as MinifbIcon, Window, WindowOptions};
 use mpris::{PlaybackStatus, PlayerFinder};
 use serde::{Deserialize, Serialize};
@@ -178,20 +178,109 @@ fn run_x11(
 }
 
 fn load_assets() -> (BitmapFont, FontAtlas) {
-    let font_path = PathBuf::from("/usr/share/deltatune/MusicTitleFont.fnt");
-    let texture_path = PathBuf::from("/usr/share/deltatune/MusicTitleFont.png");
-    // If the font fails to load, we are probably running in a development environment.
-    let (font_path, texture_path) = if !font_path.exists() || !texture_path.exists() {
-        (
-            PathBuf::from("assets/MusicTitleFont.fnt"),
-            PathBuf::from("assets/MusicTitleFont.png"),
-        )
-    } else {
-        (font_path, texture_path)
-    };
-    let mut font = load_bitmap_font(&font_path).unwrap_or_else(|_| BitmapFont::fallback());
-    let atlas = FontAtlas::load(&texture_path, &mut font).unwrap_or_else(|_| FontAtlas::empty());
+    let font_path = resolve_font_asset_path("MusicTitleFont.fnt")
+        .unwrap_or_else(|| PathBuf::from("assets/MusicTitleFont.fnt"));
+    let texture_path = default_texture_path(&font_path);
+
+    let mut font = load_bitmap_font(&font_path).unwrap_or_else(|err| {
+        eprintln!("Failed to load primary bitmap font {}: {err}", font_path.display());
+        BitmapFont::fallback()
+    });
+    let mut atlas = FontAtlas::load(&font_path, &texture_path, &mut font).unwrap_or_else(|err| {
+        eprintln!(
+            "Failed to load primary font atlas for {}: {err}",
+            font_path.display()
+        );
+        FontAtlas::empty()
+    });
+
+    for fallback_name in ["ShinonomeGothic.fnt", "Ramche.fnt"] {
+        let Some(fallback_path) = resolve_font_asset_path(fallback_name) else {
+            continue;
+        };
+        let fallback_texture_path = default_texture_path(&fallback_path);
+        let mut fallback_font = match load_bitmap_font(&fallback_path) {
+            Ok(font) => font,
+            Err(err) => {
+                eprintln!(
+                    "Failed to load fallback bitmap font {}: {err}",
+                    fallback_path.display()
+                );
+                continue;
+            }
+        };
+        let fallback_atlas =
+            match FontAtlas::load(&fallback_path, &fallback_texture_path, &mut fallback_font) {
+                Ok(atlas) => atlas,
+                Err(err) => {
+                    eprintln!(
+                        "Failed to load fallback atlas for {}: {err}",
+                        fallback_path.display()
+                    );
+                    continue;
+                }
+            };
+        merge_fallback_font(&mut font, &mut atlas, fallback_font, fallback_atlas);
+    }
+
     (font, atlas)
+}
+
+fn resolve_font_asset_path(filename: &str) -> Option<PathBuf> {
+    let installed_path = PathBuf::from("/usr/share/deltatune").join(filename);
+    if installed_path.exists() {
+        return Some(installed_path);
+    }
+
+    let local_path = PathBuf::from("assets").join(filename);
+    if local_path.exists() {
+        return Some(local_path);
+    }
+
+    None
+}
+
+fn default_texture_path(font_path: &Path) -> PathBuf {
+    let stem = font_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("MusicTitleFont");
+    font_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.png"))
+}
+
+fn merge_fallback_font(
+    base_font: &mut BitmapFont,
+    base_atlas: &mut FontAtlas,
+    fallback_font: BitmapFont,
+    fallback_atlas: FontAtlas,
+) {
+    let page_offset = base_atlas.next_page_id();
+
+    for (page_id, page) in fallback_atlas.pages {
+        base_atlas
+            .pages
+            .insert(page_id.saturating_add(page_offset), page);
+    }
+
+    for (codepoint, mut glyph) in fallback_font.glyphs {
+        if base_font.glyphs.contains_key(&codepoint) {
+            continue;
+        }
+        glyph.page = glyph.page.saturating_add(page_offset);
+        base_font.glyphs.insert(codepoint, glyph);
+    }
+
+    for (page_id, file) in fallback_font.page_files {
+        base_font
+            .page_files
+            .insert(page_id.saturating_add(page_offset), file);
+    }
+
+    base_font.line_height = base_font.line_height.max(fallback_font.line_height);
+    base_font.space_advance = base_font.space_advance.max(fallback_font.space_advance);
 }
 
 fn load_icon_buffer() -> Option<Vec<u64>> {
@@ -725,6 +814,7 @@ struct Glyph {
     x_offset: f32,
     y_offset: f32,
     x_advance: f32,
+    page: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -733,6 +823,7 @@ struct BitmapFont {
     texture_width: f32,
     texture_height: f32,
     glyphs: HashMap<u32, Glyph>,
+    page_files: HashMap<u32, String>,
     space_advance: f32,
 }
 
@@ -743,6 +834,7 @@ impl BitmapFont {
             texture_width: 256.0,
             texture_height: 256.0,
             glyphs: HashMap::new(),
+            page_files: HashMap::new(),
             space_advance: 8.0,
         }
     }
@@ -769,29 +861,93 @@ impl Default for TextAnchor {
 }
 
 struct FontAtlas {
+    pages: HashMap<u32, FontAtlasPage>,
+}
+
+struct FontAtlasPage {
     pixels: Vec<u8>,
     width: u32,
     height: u32,
 }
 
 impl FontAtlas {
-    fn load(path: &Path, font: &mut BitmapFont) -> Result<Self> {
-        let image = image::open(path)?.to_rgba8();
-        let (width, height) = image.dimensions();
-        font.set_texture_size(width as f32, height as f32);
-        Ok(Self {
-            pixels: image.into_raw(),
-            width,
-            height,
-        })
+    fn load(font_path: &Path, fallback_path: &Path, font: &mut BitmapFont) -> Result<Self> {
+        let mut page_sources: Vec<(u32, PathBuf)> = font
+            .page_files
+            .iter()
+            .map(|(id, file)| {
+                let path = font_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(file);
+                (*id, path)
+            })
+            .collect();
+        page_sources.sort_by_key(|(id, _)| *id);
+
+        if page_sources.is_empty() {
+            page_sources.push((0, fallback_path.to_path_buf()));
+        }
+
+        let mut pages = HashMap::new();
+        for (id, page_path) in page_sources {
+            let image = match image::open(&page_path) {
+                Ok(image) => image.to_rgba8(),
+                Err(err) => {
+                    eprintln!(
+                        "Failed to load font atlas page {id} from {}: {err}",
+                        page_path.display()
+                    );
+                    continue;
+                }
+            };
+            let (width, height) = image.dimensions();
+            if pages.is_empty() {
+                font.set_texture_size(width as f32, height as f32);
+            }
+            pages.insert(
+                id,
+                FontAtlasPage {
+                    pixels: image.into_raw(),
+                    width,
+                    height,
+                },
+            );
+        }
+
+        if pages.is_empty() {
+            return Err(anyhow!("no usable font atlas pages were loaded"));
+        }
+
+        Ok(Self { pages })
     }
 
     fn empty() -> Self {
+        let mut pages = HashMap::new();
+        pages.insert(
+            0,
+            FontAtlasPage {
+                pixels: vec![0, 0, 0, 0],
+                width: 1,
+                height: 1,
+            },
+        );
         Self {
-            pixels: vec![0, 0, 0, 0],
-            width: 1,
-            height: 1,
+            pages,
         }
+    }
+
+    fn page(&self, id: u32) -> Option<&FontAtlasPage> {
+        self.pages.get(&id).or_else(|| self.pages.get(&0))
+    }
+
+    fn next_page_id(&self) -> u32 {
+        self.pages
+            .keys()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
     }
 }
 
@@ -801,6 +957,7 @@ fn load_bitmap_font(path: &Path) -> Result<BitmapFont> {
     let mut tex_w = 512.0;
     let mut tex_h = 512.0;
     let mut glyphs = HashMap::new();
+    let mut page_files = HashMap::new();
 
     for line in content.lines() {
         if line.starts_with("common ") {
@@ -813,6 +970,15 @@ fn load_bitmap_font(path: &Path) -> Result<BitmapFont> {
             }
             if let Some(value) = values.get("scaleH") {
                 tex_h = value.parse::<f32>().unwrap_or(tex_h);
+            }
+        } else if line.starts_with("page ") {
+            let values = parse_kv(line);
+            let page_id = values
+                .get("id")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0);
+            if let Some(file) = values.get("file") {
+                page_files.insert(page_id, (*file).to_string());
             }
         } else if line.starts_with("char ") {
             let values = parse_kv(line);
@@ -843,6 +1009,10 @@ fn load_bitmap_font(path: &Path) -> Result<BitmapFont> {
                     .get("xadvance")
                     .and_then(|v| v.parse::<f32>().ok())
                     .unwrap_or(0.0),
+                page: values
+                    .get("page")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(0),
             };
             glyphs.insert(id, glyph);
         }
@@ -858,6 +1028,7 @@ fn load_bitmap_font(path: &Path) -> Result<BitmapFont> {
         texture_width: tex_w,
         texture_height: tex_h,
         glyphs,
+        page_files,
         space_advance,
     })
 }
@@ -1633,6 +1804,13 @@ fn draw_text(
                 continue;
             }
         };
+        let page = match atlas.page(glyph.page) {
+            Some(page) => page,
+            None => {
+                cursor_x += glyph.x_advance * scale;
+                continue;
+            }
+        };
 
         let x0 = cursor_x + glyph.x_offset * scale;
         let y0 = cursor_y + glyph.y_offset * scale;
@@ -1663,17 +1841,17 @@ fn draw_text(
                 let tex_y = glyph.y as i32 + src_y;
                 if tex_x < 0
                     || tex_y < 0
-                    || tex_x >= atlas.width as i32
-                    || tex_y >= atlas.height as i32
+                    || tex_x >= page.width as i32
+                    || tex_y >= page.height as i32
                 {
                     continue;
                 }
 
-                let src_index = ((tex_y as u32 * atlas.width + tex_x as u32) * 4) as usize;
-                let src_r = atlas.pixels[src_index];
-                let src_g = atlas.pixels[src_index + 1];
-                let src_b = atlas.pixels[src_index + 2];
-                let src_a = atlas.pixels[src_index + 3];
+                let src_index = ((tex_y as u32 * page.width + tex_x as u32) * 4) as usize;
+                let src_r = page.pixels[src_index];
+                let src_g = page.pixels[src_index + 1];
+                let src_b = page.pixels[src_index + 2];
+                let src_a = page.pixels[src_index + 3];
                 if src_a == 0 {
                     continue;
                 }

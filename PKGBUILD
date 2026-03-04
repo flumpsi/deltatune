@@ -1,6 +1,6 @@
 # Maintainer: flumpsi <flumpsi@outlook.com>
 pkgname=deltatune
-pkgver=0.1.0.r8.g645962a
+pkgver=0.1.0.r13.ge641d56
 pkgrel=1
 pkgdesc="deltatune shows you what is playing using mpris in similar fashion to what DELTARUNE did once in chapter 1 when the field of hopes and dreams started playing"
 arch=('x86_64')
@@ -33,5 +33,9 @@ package() {
   install -d "$pkgdir/usr/share/deltatune"
   install -Dm644 "assets/MusicTitleFont.fnt" "$pkgdir/usr/share/deltatune/MusicTitleFont.fnt"
   install -Dm644 "assets/MusicTitleFont.png" "$pkgdir/usr/share/deltatune/MusicTitleFont.png"
+  install -Dm644 "assets/ShinonomeGothic.fnt" "$pkgdir/usr/share/deltatune/ShinonomeGothic.fnt"
+  install -Dm644 "assets/ShinonomeGothic.png" "$pkgdir/usr/share/deltatune/ShinonomeGothic.png"
+  install -Dm644 "assets/Ramche.fnt" "$pkgdir/usr/share/deltatune/Ramche.fnt"
+  install -Dm644 "assets/Ramche.png" "$pkgdir/usr/share/deltatune/Ramche.png"
   install -Dm644 "assets/deltatune.png" "$pkgdir/usr/share/deltatune/deltatune.png"
 }
